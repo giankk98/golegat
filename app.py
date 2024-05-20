@@ -1,10 +1,10 @@
-from flask import Flask, render_template, request, redirect, url_for, flash, session, send_file, jsonify
+from flask import Flask, render_template, request, redirect, url_for, flash, session, send_file
 import os
 import openpyxl
 import re
 import xml.etree.ElementTree as ET
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 from reportlab.lib.pagesizes import landscape, A4
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Spacer
@@ -13,34 +13,47 @@ from reportlab.lib.units import inch
 import requests
 
 app = Flask(__name__)
-app.secret_key = 'b7f5c7f3a8e4d9c5b2a6d3f1e8a7c6d5e4f3b2a1c9d8e7b6a5c4b3f2a1e0d9c8'
-API_KEY = 'A47BGiGrnIedou7lERyAUBbhasfrCLeUHqNVvdmq'  # Reemplaza 'YOUR_API_KEY' con tu clave de API real
+app.secret_key = os.urandom(24)
+app.permanent_session_lifetime = timedelta(minutes=30)
+
+# Configuración de la sesión (¡nuevo!)
+app.config['SESSION_PERMANENT'] = True 
 
 # Ruta predeterminada del archivo Excel
 archivo_excel_path = os.path.join(os.getcwd(), "base de datos.xlsx")
-referencias_del_giro = []
 
 @app.route('/')
 def index():
-    return render_template('login.html')
+    return render_template('index.html')
 
 @app.route('/login', methods=['POST'])
 def login():
     usuario = request.form['usuario']
     contraseña = request.form['contraseña']
     resultado_verificacion = verificar_usuario(usuario, contraseña)
+
     if resultado_verificacion:
+        session.permanent = True
+        session['logged_in'] = True  # Asegúrate de que esta línea esté presente
         session['nombre_usuario'] = usuario
         session['result'] = []
-        return redirect(url_for('analyze'))
+        api_key = obtener_api_key(usuario)
+        session['api_key'] = api_key
+        session.modified = True  # Guardar cambios en la sesión permanente
+
+        if not api_key:
+            return redirect(url_for('set_api'))
+        else:
+            flash('API cargada correctamente.', 'success')
+            return redirect(url_for('analyze'))
     else:
         flash('Usuario o contraseña incorrectos.')
         return redirect(url_for('index'))
 
+
 @app.route('/logout')
 def logout():
-    session.pop('nombre_usuario', None)
-    session.pop('result', None)
+    session.clear()  # Asegúrate de limpiar toda la sesión
     return redirect(url_for('index'))
 
 @app.route('/analyze', methods=['GET', 'POST'])
@@ -48,14 +61,19 @@ def analyze():
     if 'nombre_usuario' not in session:
         return redirect(url_for('index'))
 
+    if 'api_key' not in session or not session['api_key']:
+        flash('Debe configurar su API Key antes de continuar.')
+        return redirect(url_for('set_api'))
+
     if request.method == 'POST':
         xml_content = request.form['xml_content']
         if not (xml_content.startswith('<AppHdr xmlns="urn:iso:std:iso:20022:tech:xsd:head.001.001.02">') or xml_content.strip().endswith('</Document>')):
             flash('CONTENIDO NO ES XML')
             return redirect(url_for('analyze'))
-        
+
         country_codes = obtener_codigos_paises()
-        analysis_result = analyze_xml(xml_content, country_codes)
+        referencias_del_giro = []  # Inicializa aquí
+        analysis_result = analyze_xml(xml_content, country_codes, referencias_del_giro)
         session['result'].extend(analysis_result)
         return render_template('report.html', analysis_result=analysis_result)
 
@@ -67,13 +85,101 @@ def new_analysis():
         return redirect(url_for('index'))
     return render_template('analyze.html')
 
-@app.route('/generate_report', methods=['POST'])
-def generate_report():
+@app.route('/profile')
+def profile():
+    if 'nombre_usuario' not in session:
+        return redirect(url_for('index'))
+    api_key = session.get('api_key', '')
+    return render_template('profile.html', api_key=api_key)
+
+@app.route('/update_password', methods=['POST'])
+def update_password():
+    if 'nombre_usuario' not in session:
+        return redirect(url_for('index'))
+    
+    new_password = request.form.get('new_password')
+    usuario = session['nombre_usuario']
+    
+    if new_password:
+        actualizar_contraseña(usuario, new_password)
+        flash('Contraseña actualizada correctamente.', 'success')
+
+    return redirect(url_for('profile'))
+
+@app.route('/update_api', methods=['POST'])
+def update_api():
+    if 'nombre_usuario' not in session:
+        return redirect(url_for('index'))
+    
+    api_key = request.form.get('api_key')
+    usuario = session['nombre_usuario']
+    
+    if api_key:
+        guardar_api_key(usuario, api_key)
+        session['api_key'] = api_key
+        flash('API Key actualizada correctamente.', 'success')
+
+    return redirect(url_for('profile'))
+
+@app.route('/forgot_password', methods=['GET', 'POST'])
+def forgot_password():
+    if request.method == 'POST':
+        usuario = request.form['usuario']
+        usuarios = obtener_usuarios()
+        if any(user['Usuario'].lower() == usuario.lower() for user in usuarios):
+            session['reset_usuario'] = usuario
+            return redirect(url_for('reset_password'))
+        else:
+            flash('Usuario no encontrado.')
+            return redirect(url_for('forgot_password'))
+    return render_template('forgot_password.html')
+
+@app.route('/reset_password', methods=['GET', 'POST'])
+def reset_password():
+    if request.method == 'POST':
+        nueva_contraseña = request.form['new_password']
+        usuario = session.get('reset_usuario')
+        if usuario and nueva_contraseña:
+            actualizar_contraseña(usuario, nueva_contraseña)
+            session.pop('reset_usuario', None)
+            flash('Contraseña restablecida correctamente.', 'success')
+            return redirect(url_for('index'))
+        else:
+            flash('Error al restablecer la contraseña.', 'danger')
+            return redirect(url_for('reset_password'))
+    return render_template('reset_password.html')
+
+
+def actualizar_contraseña(usuario, new_password):
+    try:
+        workbook = openpyxl.load_workbook(archivo_excel_path)
+        sheet = workbook["usuarios"]
+        for row in sheet.iter_rows(min_row=2, values_only=False):
+            if row[0].value.lower() == usuario.lower():
+                row[1].value = new_password
+                break
+        workbook.save(archivo_excel_path)
+    except Exception as e:
+        print(f"Error: {e}")
+
+@app.after_request
+def add_header(response):
+    response.cache_control.no_store = True
+    return response
+
+
+
+@app.route('/daily_report', methods=['POST'])
+def daily_report():
+    if 'api_key' not in session or not session['api_key']:
+        flash('Debe configurar su API Key antes de continuar.')
+        return redirect(url_for('set_api'))
+
     format_type = request.form['format']
     result = session.get('result', [])
     report_values = prepare_report_data(result)
     headers = ["Referencia del Giro", "Banco Beneficiario", "Nombre del Beneficiario", "Monto de la Transacción", "Motivo", "Tipo de Giro", "País Beneficiario"]
-    
+
     if format_type == 'excel':
         output = BytesIO()
         df = pd.DataFrame(report_values, columns=headers)
@@ -99,7 +205,60 @@ def generate_report():
         output = BytesIO()
         generate_pdf(output, report_values)
         output.seek(0)
-        return send_file(output, download_name="report.pdf", as_attachment=True)
+        return send_file(output, download_name="Reporte_Diario_RCSA.pdf", as_attachment=True)
+
+@app.route('/set_api', methods=['GET', 'POST'])
+def set_api():
+    if 'nombre_usuario' not in session:
+        return redirect(url_for('index'))
+
+    if request.method == 'POST':
+        api_key = request.form['api_key']
+        usuario = session['nombre_usuario']
+        guardar_api_key(usuario, api_key)
+        session['api_key'] = api_key
+        flash('API Key guardada correctamente.', 'success')
+        return redirect(url_for('analyze'))
+
+    return render_template('set_api.html')
+
+@app.route('/generate_report', methods=['POST'])
+def generate_report():
+    if 'api_key' not in session or not session['api_key']:
+        flash('Debe configurar su API Key antes de continuar.')
+        return redirect(url_for('set_api'))
+
+    format_type = request.form['format']
+    result = session.get('result', [])
+    report_values = prepare_report_data(result)
+    headers = ["Referencia del Giro", "Banco Beneficiario", "Nombre del Beneficiario", "Monto de la Transacción", "Motivo", "Tipo de Giro", "País Beneficiario"]
+
+    if format_type == 'excel':
+        output = BytesIO()
+        df = pd.DataFrame(report_values, columns=headers)
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            df.to_excel(writer, index=False, sheet_name='Reporte', startrow=1, header=False)
+            workbook = writer.book
+            worksheet = writer.sheets['Reporte']
+            cell_format = workbook.add_format({'border': 1})
+            for row_num, row in enumerate(df.values, 1):
+                for col_num, value in enumerate(row):
+                    worksheet.write(row_num, col_num, value, cell_format)
+            header_format = workbook.add_format({'bold': True, 'text_wrap': True, 'valign': 'top', 'fg_color': '#D7E4BC', 'border': 1})
+            for col_num, value in enumerate(df.columns.values):
+                worksheet.write(0, col_num, value, header_format)
+            for column in df:
+                column_width = max(df[column].astype(str).apply(len).max(), len(column))
+                col_idx = df.columns.get_loc(column)
+                worksheet.set_column(col_idx, col_idx, column_width + 1)
+            worksheet.set_footer(f'&LUsuario: {session["nombre_usuario"]}&C&F')
+        output.seek(0)
+        return send_file(output, download_name="report.xlsx", as_attachment=True)
+    elif format_type == 'pdf':
+        output = BytesIO()
+        generate_pdf(output, report_values)
+        output.seek(0)
+        return send_file(output, download_name="ReporteXML.pdf", as_attachment=True)
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in {'xml'}
@@ -115,11 +274,42 @@ def obtener_usuarios():
     try:
         workbook = openpyxl.load_workbook(archivo_excel_path)
         sheet = workbook["usuarios"]
-        usuarios = [{'Usuario': str(row[0]), 'Contraseña': str(row[1])} for row in sheet.iter_rows(min_row=2, values_only=True) if row[0] and row[1]]
+        usuarios = [{'Usuario': str(row[0]), 'Contraseña': str(row[1]), 'API': row[2] if len(row) > 2 else None} for row in sheet.iter_rows(min_row=2, values_only=True) if row[0] and row[1]]
         return usuarios
     except Exception as e:
         print(f"Error: {e}")
         return []
+
+def obtener_api_key(usuario):
+    usuarios = obtener_usuarios()
+    for user in usuarios:
+        if user['Usuario'].lower() == usuario.lower():
+            return user.get('API')
+    return None
+
+def guardar_api_key(usuario, api_key):
+    try:
+        workbook = openpyxl.load_workbook(archivo_excel_path)
+        sheet = workbook["usuarios"]
+        for row in sheet.iter_rows(min_row=2, values_only=False):
+            if row[0].value.lower() == usuario.lower():
+                row[2].value = api_key
+                break
+        workbook.save(archivo_excel_path)
+    except Exception as e:
+        print(f"Error: {e}")
+
+def cambiar_contraseña(usuario, nueva_contraseña):
+    try:
+        workbook = openpyxl.load_workbook(archivo_excel_path)
+        sheet = workbook["usuarios"]
+        for row in sheet.iter_rows(min_row=2, values_only=False):
+            if row[0].value.lower() == usuario.lower():
+                row[1].value = nueva_contraseña
+                break
+        workbook.save(archivo_excel_path)
+    except Exception as e:
+        print(f"Error: {e}")
 
 def obtener_codigos_paises():
     try:
@@ -136,15 +326,14 @@ def obtener_codigos_paises():
 def obtener_informacion_banco(swift_code):
     swift_code = swift_code.rstrip('X')  # Elimina los 'X' del final si existen
     api_url = f'https://api.api-ninjas.com/v1/swiftcode?swift={swift_code}'
-    response = requests.get(api_url, headers={'X-Api-Key': API_KEY})
+    response = requests.get(api_url, headers={'X-Api-Key': session.get('api_key')})
     if response.status_code == 200:
         bank_info = response.json()
         if bank_info:
             return bank_info[0]['bank_name']
     return "N/A"
 
-def analyze_xml(xml_content, country_codes):
-    global referencias_del_giro
+def analyze_xml(xml_content, country_codes, referencias_del_giro):
     result = session.get('result', [])
     xml_content = preprocess_xml(xml_content)
     wrapped_xml_content = f"<root>{xml_content}</root>"

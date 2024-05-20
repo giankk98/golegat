@@ -1,42 +1,47 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Analizar XML</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
-</head>
-<body>
-    <header>
-        <img src="{{ url_for('static', filename='images/logo2.png') }}" alt="Logo" class="logo">
-        <h1>SWIFT-XML</h1>
-        <nav>
-            <a href="{{ url_for('logout') }}">Cerrar Sesión</a>
-        </nav>
-    </header>
-    <div class="container">
-        <h2>Analizar XML</h2>
-        {% with messages = get_flashed_messages() %}
+{% extends "base.html" %}
+{% block title %}Analizar XML{% endblock %}
+{% block content %}
+
+<script>
+  document.addEventListener('DOMContentLoaded', function() {
+      const form = document.getElementById('analyze-form');
+      const loading = document.getElementById('loading');
+
+      form.addEventListener('submit', function() {
+          loading.style.display = 'flex';  // Show the loading spinner immediately
+      });
+
+      // Existing code for alerts...
+  });
+</script>
+
+<div class="container">
+    <div id="flash-messages">
+        {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
-                <div class="alert-message show">
-                    {% for message in messages %}
-                        {{ message }}
-                    {% endfor %}
-                </div>
+                {% for category, message in messages %}
+                    <div class="alert-message {{ category }} show">{{ message }}</div>
+                {% endfor %}
             {% endif %}
         {% endwith %}
-        <form id="analyze-form" action="{{ url_for('analyze') }}" method="POST">
-            <label for="xml_content">Pegue el contenido XML aquí:</label>
-            <textarea id="xml_content" name="xml_content" rows="15" required></textarea>
-            <div class="buttons-container">
-                <button type="submit">Analizar XML</button>
-            </div>
-        </form>
-        <div id="loading" class="loading-spinner" style="display: none;">
-            <div class="spinner"></div>
-            <p>Analizando...</p>
-        </div>
     </div>
-    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
-</body>
-</html>
+    <h2>Analizar XML</h2>
+    <form id="analyze-form" action="{{ url_for('analyze') }}" method="POST">
+        <label for="xml_content">Pegue el contenido XML aquí:</label>
+        <textarea id="xml_content" name="xml_content" rows="15" required></textarea>
+        <div class="buttons-container">
+            <button type="submit">Analizar XML</button>
+        </div>
+    </form>
+    <div id="loading" class="loading-spinner" style="display: none;">
+        <div class="spinner"></div>
+        <p>Analizando...</p>
+    </div>
+    <div class="buttons-container">
+        <form action="{{ url_for('daily_report') }}" method="POST">
+            <button type="submit" name="format" value="excel">Generar Reporte Diario en Excel</button>
+            <button type="submit" name="format" value="pdf">Generar Reporte Diario en PDF</button>
+        </form>
+    </div>
+</div>
+{% endblock %}
